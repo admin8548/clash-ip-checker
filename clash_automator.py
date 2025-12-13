@@ -8,18 +8,17 @@ from utils.config_loader import load_config
 from core.ip_checker import IPChecker
 
 # --- CONFIGURATION ---
-# Load from config.yaml if exists
 cfg = load_config("config.yaml") or {}
-
-# User provided path
-CLASH_CONFIG_PATH = cfg.get('yaml_path', "config.yaml")
-# API URL (Default for Clash)
+# 这里的 config.yaml 是写死的，对应 workflow
+CLASH_CONFIG_PATH = cfg.get('yaml_path', "config.yaml") 
 CLASH_API_URL = cfg.get('clash_api_url', "http://127.0.0.1:9097")
 CLASH_API_SECRET = cfg.get('clash_api_secret', "")
-# The selector to switch. Usually "GLOBAL" or "Proxy"
 SELECTOR_NAME = cfg.get('selector_name', "GLOBAL")
-# Output suffix
 OUTPUT_SUFFIX = cfg.get('output_suffix', "_checked")
+
+# 测速配置
+SPEED_TEST_URL = "http://www.gstatic.com/generate_204"
+SPEED_TEST_TIMEOUT = 3000 # 3000ms 超时
 
 class ClashController:
     def __init__(self, api_url, secret=""):
@@ -30,38 +29,47 @@ class ClashController:
         }
 
     async def switch_proxy(self, selector, proxy_name):
-        """Switches the selector to the specified proxy."""
         url = f"{self.api_url}/proxies/{urllib.parse.quote(selector)}"
         payload = {"name": proxy_name}
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.put(url, json=payload, headers=self.headers, timeout=5) as resp:
-                    if resp.status == 204:
-                        return True
-                    else:
-                        print(f"Failed to switch to {proxy_name}. Status: {resp.status}")
-                        # print(await resp.text()) # Reduce noise
-                        return False
+                    return resp.status == 204
         except Exception as e:
             print(f"API Error switching to {proxy_name}: {e}")
             return False
 
     async def set_mode(self, mode):
-        """Sets the Clash mode (global, rule, direct)."""
         url = f"{self.api_url}/configs"
         payload = {"mode": mode}
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.patch(url, json=payload, headers=self.headers, timeout=5) as resp:
-                    if resp.status == 204:
-                        print(f"Successfully set mode to: {mode}")
-                        return True
-                    else:
-                        print(f"Failed to set mode logic. Status: {resp.status}")
-                        return False
-        except Exception as e:
-            print(f"API Error setting mode: {e}")
+                    return resp.status == 204
+        except Exception:
             return False
+
+    async def get_proxy_delay(self, proxy_name):
+        """
+        调用 Clash API 测试单个节点延迟
+        返回: 延迟(ms) 或 None (失败)
+        """
+        encoded_name = urllib.parse.quote(proxy_name)
+        url = f"{self.api_url}/proxies/{encoded_name}/delay"
+        params = {
+            "timeout": str(SPEED_TEST_TIMEOUT),
+            "url": SPEED_TEST_URL
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=self.headers, params=params, timeout=5) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        return data.get('delay')
+                    else:
+                        return None
+        except Exception:
+            return None
 
 async def process_proxies():
     print(f"Loading config from: {CLASH_CONFIG_PATH}")
@@ -71,7 +79,7 @@ async def process_proxies():
 
     try:
         with open(CLASH_CONFIG_PATH, 'r', encoding='utf-8') as f:
-            config_data = yaml.full_load(f) # full_load is safer for complex local yamls than safe_load
+            config_data = yaml.full_load(f)
     except Exception as e:
         print(f"Error parsing YAML: {e}")
         return
@@ -81,72 +89,74 @@ async def process_proxies():
         print("No 'proxies' found in config.")
         return
 
-    # Filter keywords (partial match)
-    # Removed "流量" because it matches "流量倍率" in valid nodes
     SKIP_KEYWORDS = ["剩余", "重置", "到期", "有效期", "官网", "网址", "更新", "公告"]
-    
-    print(f"Found {len(proxies)} proxies to test.")
     
     controller = ClashController(CLASH_API_URL, CLASH_API_SECRET)
     
-    # FORCE GLOBAL MODE
+    # --- 阶段 1: 快速连通性测试 (新增功能) ---
+    print(f"\n🚀 [Phase 1] Starting Connectivity Test for {len(proxies)} nodes...")
+    print(f"   Timeout: {SPEED_TEST_TIMEOUT}ms | URL: {SPEED_TEST_URL}")
+    
+    valid_proxies = []
+    
+    # 限制并发数，防止把 Clash 冲垮
+    semaphore = asyncio.Semaphore(50) 
+
+    async def check_node(proxy):
+        name = proxy['name']
+        # 关键词过滤
+        for kw in SKIP_KEYWORDS:
+            if kw in name:
+                return None
+        
+        async with semaphore:
+            delay = await controller.get_proxy_delay(name)
+            if delay:
+                print(f"   ✅ {delay}ms | {name}")
+                return proxy
+            else:
+                print(f"   ❌ Timeout | {name}")
+                return None
+
+    tasks = [check_node(p) for p in proxies]
+    results = await asyncio.gather(*tasks)
+    
+    # 过滤掉 None
+    valid_proxies = [p for p in results if p is not None]
+    
+    print(f"\n📊 [Phase 1 Summary] Total: {len(proxies)} -> Alive: {len(valid_proxies)}")
+    print("---------------------------------------------------")
+
+    if not valid_proxies:
+        print("No valid proxies left after speed test. Exiting.")
+        return
+
+    # --- 阶段 2: IP 纯净度检查 (原有逻辑) ---
+    print(f"\n🕵️ [Phase 2] Starting IP Purity Check for {len(valid_proxies)} nodes...")
+    
+    # 强制全局模式
     await controller.set_mode("global")
     
-    # DYNAMICALLY DETECT PORT FROM API
-    # Profiles often don't contain the running port (managed by GUI)
-    # We fetch the actual listening port from the running instance.
-    mixed_port = 7890 # fallback
+    # 获取端口
+    mixed_port = 7890
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(f"{CLASH_API_URL}/configs", headers=controller.headers) as resp:
                 if resp.status == 200:
                     conf = await resp.json()
-                    # Priority: mixed-port > port (http) > socks-port
-                    if conf.get('mixed-port', 0) != 0:
-                        mixed_port = conf['mixed-port']
-                    elif conf.get('port', 0) != 0:
-                        mixed_port = conf['port']
-                    elif conf.get('socks-port', 0) != 0:
-                        mixed_port = conf['socks-port']
-                    print(f"Detected Running Port from API: {mixed_port}")
-    except Exception as e:
-        print(f"Failed to fetch config from API: {e}")
+                    if conf.get('mixed-port', 0) != 0: mixed_port = conf['mixed-port']
+    except Exception:
+        pass
 
     local_proxy_url = f"http://127.0.0.1:{mixed_port}"
     print(f"Using Local Proxy: {local_proxy_url}")
     
+    # 确定 Selector (通常是 GLOBAL)
     selector_to_use = SELECTOR_NAME
-
-    # DEBUG: Check Selectors and Auto-Detect
-    try:
-        async with aiohttp.ClientSession() as session:
-            url = f"{CLASH_API_URL}/proxies"
-            headers = {"Authorization": f"Bearer {CLASH_API_SECRET}"}
-            async with session.get(url, headers=headers) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    all_proxies = data.get('proxies', {})
-                    print("\n--- Available Selectors ---")
-                    found_global = False
-                    found_proxy = False
-                    
-                    for k, v in all_proxies.items():
-                        if v.get('type') in ['Selector', 'URLTest', 'FallBack']:
-                            print(f"  {k}: {v.get('type')} | Currently: {v.get('now')}")
-                            if k == "GLOBAL": found_global = True
-                            if k == "Proxy": found_proxy = True
-                    print("---------------------------\n")
-                    
-                    if not found_global and found_proxy:
-                        print(f"NOTE: 'GLOBAL' selector not found, switching to 'Proxy'.")
-                        selector_to_use = "Proxy"
-                    elif not found_global and not found_proxy:
-                         # Fallback to first selector?
-                         pass
-                else:
-                    print(f"Failed to list proxies. Status: {resp.status}")
-    except Exception as e:
-        print(f"Debug API Error: {e}")
+    # (省略了复杂的 selector 检测逻辑，直接尝试 GLOBAL，失败则尝试 Proxy)
+    # 简单的 fallback 逻辑
+    if not await controller.switch_proxy("GLOBAL", valid_proxies[0]['name']):
+        selector_to_use = "Proxy"
 
     checker = IPChecker(headless=True)
     await checker.start()
@@ -154,97 +164,76 @@ async def process_proxies():
     results_map = {} # name -> result_suffix
 
     try:
-        for i, proxy in enumerate(proxies):
+        for i, proxy in enumerate(valid_proxies):
             name = proxy['name']
+            print(f"\n[{i+1}/{len(valid_proxies)}] Checking: {name}")
             
-            # 0. Check for skip keywords
-            should_skip = False
-            for kw in SKIP_KEYWORDS:
-                if kw in name:
-                    should_skip = True
-                    break
-            
-            if should_skip:
-                print(f"\n[{i+1}/{len(proxies)}] Skipping (Status Node): {name}")
+            # 切换节点
+            if not await controller.switch_proxy(selector_to_use, name):
+                print("  -> Switch failed.")
                 continue
 
-            print(f"\n[{i+1}/{len(proxies)}] Testing: {name}")
-            
-            # 1. Switch Node
-            print(f"  -> Switching {selector_to_use} ...")
-            switched = await controller.switch_proxy(selector_to_use, name)
-            if not switched:
-                print("  -> Switch failed, skipping IP check.")
-                continue
+            await asyncio.sleep(2) # 等待切换生效
 
-            # 2. Wait for switch to take effect / connection reset
-            await asyncio.sleep(2) 
-
-            # 3. Check IP with Retry
-            print("  -> Running IP Check...")
+            # 测 IP
             res = None
             for attempt in range(2):
                 try:
-                    # Pass the local proxy explicitly to ensure Playwright uses it
                     res = await checker.check(proxy=local_proxy_url)
                     if res.get('error') is None and res.get('pure_score') != '❓':
-                         break # Success
+                         break
                     if attempt == 0:
-                        print("     Retrying IP check...")
                         await asyncio.sleep(2)
-                except Exception as e:
-                     print(f"     Check error: {e}")
+                except Exception:
+                     pass
             
             if not res:
-                 res = {"full_string": "【❌ Error】", "ip": "Error", "pure_score": "?", "bot_score": "?"}
+                 res = {"full_string": "【❌ Error】", "ip": "Error"}
 
             full_str = res['full_string']
-            
-            # Extract details for logging
-            ip_addr = res.get('ip', 'Unknown')
-            p_score = res.get('pure_score', 'N/A')
-            b_score = res.get('bot_score', 'N/A')
-            
-            print(f"  -> Result: {full_str}")
-            print(f"  -> Details: IP: {ip_addr} | Score: {p_score} | Bot: {b_score}")
-            
+            print(f"  -> Result: {full_str} | IP: {res.get('ip')}")
             results_map[name] = full_str
 
     except KeyboardInterrupt:
-        print("\nProcess interrupted by user. Saving current progress...")
+        print("\nInterrupted. Saving...")
     finally:
         await checker.stop()
 
-    # Apply renames to config data
-    print("\nUpdating config names...")
-    new_proxies = []
+    # --- 阶段 3: 保存结果 ---
+    print("\n💾 Saving results...")
     
-    name_mapping = {} # Old -> New
+    # 我们只保存 Phase 1 存活下来的节点，并更新名字
+    final_proxies = []
+    name_mapping = {}
 
-    for proxy in proxies:
+    for proxy in valid_proxies:
         old_name = proxy['name']
         if old_name in results_map:
+            # 加上检测结果后缀
             new_name = f"{old_name} {results_map[old_name]}"
             proxy['name'] = new_name
             name_mapping[old_name] = new_name
-        new_proxies.append(proxy)
+            final_proxies.append(proxy)
+        else:
+            # 测速通过了，但 IP 检测没结果（可能中断了），也保留
+            final_proxies.append(proxy)
     
-    config_data['proxies'] = new_proxies
+    config_data['proxies'] = final_proxies
 
-    # Update groups
+    # 更新 Proxy Groups (如果有的话)
     if 'proxy-groups' in config_data:
         for group in config_data['proxy-groups']:
             if 'proxies' in group:
                 new_group_proxies = []
                 for p_name in group['proxies']:
+                    # 如果原节点被改名了，用新名字
                     if p_name in name_mapping:
                         new_group_proxies.append(name_mapping[p_name])
-                    else:
-                        new_group_proxies.append(p_name)
+                    # 如果原节点没改名（说明没通过测速被删了），就不加进去
                 group['proxies'] = new_group_proxies
 
-    # Save to CURRENT DIRECTORY
-    base = os.path.basename(CLASH_CONFIG_PATH) # Get filename only
+    # 保存
+    base = os.path.basename(CLASH_CONFIG_PATH)
     filename, ext = os.path.splitext(base)
     output_filename = f"{filename}{OUTPUT_SUFFIX}{ext}"
     output_path = os.path.join(os.getcwd(), output_filename)
@@ -252,10 +241,9 @@ async def process_proxies():
     try:
         with open(output_path, 'w', encoding='utf-8') as f:
             yaml.dump(config_data, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
-        print(f"\nSuccess! Saved updated config to: {output_path}")
+        print(f"\nSuccess! Saved {len(final_proxies)} nodes to: {output_path}")
     except Exception as e:
         print(f"Error saving config: {e}")
 
 if __name__ == "__main__":
-    # asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy()) # REMOVED: Playwright requires Proactor on Windows
     asyncio.run(process_proxies())
