@@ -4,6 +4,8 @@ import aiohttp
 import urllib.parse
 import os
 import sys
+import base64
+import json
 from utils.config_loader import load_config
 from core.ip_checker import IPChecker
 
@@ -131,8 +133,8 @@ async def process_proxies():
         print("No valid proxies left after speed test. Exiting.")
         return
 
-    # --- 阶段 1.5: IP 预检测去重 ---
-    print(f"\n🔄 [Phase 1.5] Pre-checking IPs for deduplication...")
+    # --- 阶段 1.5: IP 预检测去重 (优化版:并发检测) ---
+    print(f"\n🔄 [Phase 1.5] Pre-checking IPs for deduplication (Concurrent Mode)...")
     
     # 强制全局模式
     await controller.set_mode("global")
@@ -166,33 +168,52 @@ async def process_proxies():
     temp_checker = IPChecker(headless=True)
     await temp_checker.start()
     
-    try:
-        for i, proxy in enumerate(valid_proxies):
-            name = proxy['name']
-            print(f"   [{i+1}/{len(valid_proxies)}] Checking: {name}")
-            
-            # 切换节点
-            if not await controller.switch_proxy(selector_to_use, name):
-                print(f"      -> Switch failed, keeping node.")
-                unique_proxies.append(proxy)
-                continue
+    # 并发检测函数
+    async def check_proxy_ip(i, proxy):
+        """并发检测单个节点的IP"""
+        name = proxy['name']
+        print(f"   [{i+1}/{len(valid_proxies)}] Checking: {name}")
+        
+        # 切换节点
+        if not await controller.switch_proxy(selector_to_use, name):
+            print(f"      -> Switch failed, keeping node.")
+            return (proxy, None, True)  # (proxy, ip, keep_anyway)
 
-            await asyncio.sleep(1)  # 等待切换生效
+        await asyncio.sleep(0.8)  # 稍微缩短等待时间
+        
+        # 快速获取IP
+        ip = await temp_checker.get_simple_ip(local_proxy_url)
+        
+        if ip:
+            print(f"      ✅ {ip} | {name}")
+            return (proxy, ip, False)
+        else:
+            # IP获取失败的也保留,后续浏览器检测
+            print(f"      ❓ Unknown IP | {name}")
+            return (proxy, None, True)
+    
+    try:
+        # 分批并发处理，每批8个节点
+        batch_size = 8
+        for batch_start in range(0, len(valid_proxies), batch_size):
+            batch_end = min(batch_start + batch_size, len(valid_proxies))
+            batch = valid_proxies[batch_start:batch_end]
             
-            # 快速获取IP
-            ip = await temp_checker.get_simple_ip(local_proxy_url)
+            # 并发检测这一批
+            tasks = [check_proxy_ip(batch_start + j, proxy) for j, proxy in enumerate(batch)]
+            batch_results = await asyncio.gather(*tasks)
             
-            if ip:
-                if ip not in ip_to_proxy:
-                    ip_to_proxy[ip] = proxy
+            # 处理结果
+            for proxy, ip, keep_anyway in batch_results:
+                if keep_anyway:
+                    # 切换失败或IP获取失败，保留节点
                     unique_proxies.append(proxy)
-                    print(f"      ✅ {ip} | {name}")
-                else:
-                    print(f"      ⏭️ {ip} | {name} (duplicate of {ip_to_proxy[ip]['name']})")
-            else:
-                # IP获取失败的也保留,后续浏览器检测
-                unique_proxies.append(proxy)
-                print(f"      ❓ Unknown IP | {name}")
+                elif ip:
+                    if ip not in ip_to_proxy:
+                        ip_to_proxy[ip] = proxy
+                        unique_proxies.append(proxy)
+                    else:
+                        print(f"      ⏭️ {ip} | {proxy['name']} (duplicate of {ip_to_proxy[ip]['name']})")
     finally:
         await temp_checker.stop()
     
@@ -303,8 +324,19 @@ async def process_proxies():
     for proxy in valid_proxies:  # 注意：这里还是用valid_proxies，因为要去重所有节点
         old_name = proxy['name']
         if old_name in results_map:
-            # 加上检测结果后缀
-            new_name = f"{old_name} {results_map[old_name]}"
+            # 方案C格式：【🟢🟠 机|广】原节点名
+            result_suffix = results_map[old_name]
+            
+            # 直接提取【】内的完整内容作为前缀
+            import re
+            emoji_match = re.search(r'【([^】]+)】', result_suffix)
+            if emoji_match:
+                prefix = f"【{emoji_match.group(1)}】"
+                new_name = f"{prefix}{old_name}"
+            else:
+                # 没有匹配到，使用原格式
+                new_name = f"{old_name} {result_suffix}"
+            
             proxy['name'] = new_name
             name_mapping[old_name] = new_name
             final_proxies.append(proxy)
@@ -335,9 +367,165 @@ async def process_proxies():
     try:
         with open(output_path, 'w', encoding='utf-8') as f:
             yaml.dump(config_data, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
-        print(f"\nSuccess! Saved {len(final_proxies)} nodes to: {output_path}")
+        print(f"\n✅ Clash格式已保存: {output_path}")
     except Exception as e:
-        print(f"Error saving config: {e}")
+        print(f"Error saving Clash config: {e}")
+    
+    # --- 新增：生成v2rayN格式订阅 ---
+    print("\n📝 Generating v2rayN subscription...")
+    v2rayn_links = []
+    
+    for proxy in final_proxies:
+        try:
+            link = convert_to_v2rayn_link(proxy)
+            if link:
+                v2rayn_links.append(link)
+        except Exception as e:
+            print(f"  ⚠️ Failed to convert {proxy['name']}: {e}")
+    
+    if v2rayn_links:
+        # Base64编码
+        v2rayn_content = '\n'.join(v2rayn_links)
+        v2rayn_base64 = base64.b64encode(v2rayn_content.encode('utf-8')).decode('utf-8')
+        
+        # 保存v2rayN订阅文件
+        v2rayn_filename = f"{filename}{OUTPUT_SUFFIX}_v2rayn.txt"
+        v2rayn_path = os.path.join(os.getcwd(), v2rayn_filename)
+        
+        try:
+            with open(v2rayn_path, 'w', encoding='utf-8') as f:
+                f.write(v2rayn_base64)
+            print(f"✅ v2rayN格式已保存: {v2rayn_path}")
+            print(f"   节点数量: {len(v2rayn_links)}")
+        except Exception as e:
+            print(f"Error saving v2rayN subscription: {e}")
+    else:
+        print("⚠️ 没有可转换的节点用于v2rayN格式")
+
+def convert_to_v2rayn_link(proxy):
+    """
+    将Clash节点配置转换为v2rayN通用订阅链接
+    支持的协议: vmess, vless, trojan, ss, ssr, hysteria2
+    """
+    proxy_type = proxy.get('type', '').lower()
+    name = proxy.get('name', 'Unknown')
+    
+    if proxy_type == 'vmess':
+        return convert_vmess(proxy)
+    elif proxy_type == 'vless':
+        return convert_vless(proxy)
+    elif proxy_type == 'trojan':
+        return convert_trojan(proxy)
+    elif proxy_type == 'ss':
+        return convert_shadowsocks(proxy)
+    elif proxy_type == 'ssr':
+        return convert_shadowsocksr(proxy)
+    elif proxy_type == 'hysteria2':
+        return convert_hysteria2(proxy)
+    else:
+        print(f"  ⚠️ Unsupported protocol: {proxy_type} for {name}")
+        return None
+
+def convert_vmess(proxy):
+    """转换VMess节点"""
+    vmess_config = {
+        "v": "2",
+        "ps": proxy.get('name', ''),
+        "add": proxy.get('server', ''),
+        "port": str(proxy.get('port', '')),
+        "id": proxy.get('uuid', ''),
+        "aid": str(proxy.get('alterId', 0)),
+        "net": proxy.get('network', 'tcp'),
+        "type": proxy.get('ws-opts', {}).get('headers', {}).get('Host', 'none') if proxy.get('network') == 'ws' else 'none',
+        "host": proxy.get('ws-opts', {}).get('path', '') if proxy.get('network') == 'ws' else '',
+        "path": proxy.get('ws-opts', {}).get('path', '') if proxy.get('network') == 'ws' else '',
+        "tls": "tls" if proxy.get('tls', False) else "",
+        "sni": proxy.get('servername', ''),
+        "alpn": proxy.get('alpn', [])
+    }
+    
+    vmess_json = json.dumps(vmess_config, separators=(',', ':'))
+    vmess_base64 = base64.b64encode(vmess_json.encode('utf-8')).decode('utf-8')
+    return f"vmess://{vmess_base64}"
+
+def convert_vless(proxy):
+    """转换VLESS节点"""
+    server = proxy.get('server', '')
+    port = proxy.get('port', '')
+    uuid = proxy.get('uuid', '')
+    name = urllib.parse.quote(proxy.get('name', ''))
+    
+    params = []
+    if proxy.get('network'):
+        params.append(f"type={proxy['network']}")
+    if proxy.get('tls'):
+        params.append("security=tls")
+    if proxy.get('sni'):
+        params.append(f"sni={proxy['sni']}")
+    
+    query = '&'.join(params) if params else ''
+    return f"vless://{uuid}@{server}:{port}?{query}#{name}"
+
+def convert_trojan(proxy):
+    """转换Trojan节点"""
+    server = proxy.get('server', '')
+    port = proxy.get('port', '')
+    password = proxy.get('password', '')
+    name = urllib.parse.quote(proxy.get('name', ''))
+    
+    params = []
+    if proxy.get('sni'):
+        params.append(f"sni={proxy['sni']}")
+    if proxy.get('skip-cert-verify'):
+        params.append("allowInsecure=1")
+    
+    query = '&'.join(params) if params else ''
+    return f"trojan://{password}@{server}:{port}?{query}#{name}"
+
+def convert_shadowsocks(proxy):
+    """转换Shadowsocks节点"""
+    server = proxy.get('server', '')
+    port = proxy.get('port', '')
+    method = proxy.get('cipher', '')
+    password = proxy.get('password', '')
+    name = urllib.parse.quote(proxy.get('name', ''))
+    
+    # method:password
+    userinfo = f"{method}:{password}"
+    userinfo_base64 = base64.b64encode(userinfo.encode('utf-8')).decode('utf-8')
+    
+    return f"ss://{userinfo_base64}@{server}:{port}#{name}"
+
+def convert_shadowsocksr(proxy):
+    """转换ShadowsocksR节点"""
+    # SSR格式较复杂，这里提供基础实现
+    server = proxy.get('server', '')
+    port = proxy.get('port', '')
+    protocol = proxy.get('protocol', '')
+    method = proxy.get('cipher', '')
+    obfs = proxy.get('obfs', '')
+    password = base64.b64encode(proxy.get('password', '').encode('utf-8')).decode('utf-8')
+    
+    ssr_raw = f"{server}:{port}:{protocol}:{method}:{obfs}:{password}"
+    ssr_base64 = base64.b64encode(ssr_raw.encode('utf-8')).decode('utf-8')
+    
+    return f"ssr://{ssr_base64}"
+
+def convert_hysteria2(proxy):
+    """转换Hysteria2节点"""
+    server = proxy.get('server', '')
+    port = proxy.get('port', '')
+    password = proxy.get('password', '')
+    name = urllib.parse.quote(proxy.get('name', ''))
+    
+    params = []
+    if proxy.get('sni'):
+        params.append(f"sni={proxy['sni']}")
+    if proxy.get('skip-cert-verify'):
+        params.append("insecure=1")
+    
+    query = '&'.join(params) if params else ''
+    return f"hysteria2://{password}@{server}:{port}?{query}#{name}"
 
 if __name__ == "__main__":
     asyncio.run(process_proxies())
