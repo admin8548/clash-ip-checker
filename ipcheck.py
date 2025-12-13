@@ -135,16 +135,37 @@ class IPChecker:
                 ip_match = re.search(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", text)
                 if ip_match: result["ip"] = ip_match.group(0)
 
-            # 构建更清晰的输出字符串
+            # 构建精简的输出字符串（方案C：Emoji+文字缩写）
             attr = result["ip_attr"] if result["ip_attr"] != "❓" else ""
             src = result["ip_src"] if result["ip_src"] != "❓" else ""
+            
+            # 属性缩写映射
+            attr_abbr_map = {
+                "机房": "机",
+                "数据中心": "机",
+                "住宅": "宅",
+                "企业": "企",
+                "教育": "教"
+            }
+            
+            # 来源缩写映射
+            src_abbr_map = {
+                "原生": "原",
+                "广播": "广",
+                "ISP": "ISP",
+                "企业": "企"
+            }
+            
+            # 应用缩写
+            attr_short = attr_abbr_map.get(attr, attr[:1] if attr and attr != "❓" else "")
+            src_short = src_abbr_map.get(src, src[:1] if src and src != "❓" else "")
 
-            if attr and src:
-                info = f"{attr}|{src}"
-            elif attr:
-                info = attr
-            elif src:
-                info = src
+            if attr_short and src_short:
+                info = f"{attr_short}|{src_short}"
+            elif attr_short:
+                info = attr_short
+            elif src_short:
+                info = src_short
             else:
                 info = "检测中"
             
@@ -203,16 +224,37 @@ class IPChecker:
                 result["ip_src"] = "广播"
                 result["pure_score"] = "40%"
                 result["bot_score"] = "60%"
-                # 构建更清晰的输出字符串
+                # 构建精简的输出字符串（方案C：Emoji+文字缩写）
                 attr = result["ip_attr"] if result["ip_attr"] != "❓" else ""
                 src = result["ip_src"] if result["ip_src"] != "❓" else ""
+                
+                # 属性缩写映射
+                attr_abbr_map = {
+                    "机房": "机",
+                    "数据中心": "机",
+                    "住宅": "宅",
+                    "企业": "企",
+                    "教育": "教"
+                }
+                
+                # 来源缩写映射
+                src_abbr_map = {
+                    "原生": "原",
+                    "广播": "广",
+                    "ISP": "ISP",
+                    "企业": "企"
+                }
+                
+                # 应用缩写
+                attr_short = attr_abbr_map.get(attr, attr[:1] if attr and attr != "❓" else "")
+                src_short = src_abbr_map.get(src, src[:1] if src and src != "❓" else "")
 
-                if attr and src:
-                    info = f"{attr}|{src}"
-                elif attr:
-                    info = attr
-                elif src:
-                    info = src
+                if attr_short and src_short:
+                    info = f"{attr_short}|{src_short}"
+                elif attr_short:
+                    info = attr_short
+                elif src_short:
+                    info = src_short
                 else:
                     info = "检测中"
                 
