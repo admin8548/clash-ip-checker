@@ -172,7 +172,8 @@ async def process_proxies():
         # 串行逐个检测，给IP池充足的轮询时间
         for i, proxy in enumerate(valid_proxies):
             name = proxy['name']
-            print(f"   [{i+1}/{len(valid_proxies)}] Checking: {name}")
+            source = proxy.get('_source', 'Unknown')
+            print(f"   [{i+1}/{len(valid_proxies)}] Checking: {name} ({source})")
             
             # 切换节点
             if not await controller.switch_proxy(selector_to_use, name):
@@ -193,8 +194,22 @@ async def process_proxies():
                     unique_proxies.append(proxy)
                     print(f"      ✅ {ip} | {name}")
                 else:
-                    # 重复IP，跳过
-                    print(f"      ⏭️ {ip} | {name} (duplicate of {ip_to_proxy[ip]['name']})")
+                    # 重复IP，判断是否跨订阅
+                    duplicate_proxy = ip_to_proxy[ip]
+                    duplicate_name = duplicate_proxy['name']
+                    duplicate_source = duplicate_proxy.get('_source', 'Unknown')
+                    current_source = proxy.get('_source', 'Unknown')
+                    
+                    if duplicate_source == current_source:
+                        # 同订阅内IP重复 = IP池共享，仍然保留
+                        unique_proxies.append(proxy)
+                        print(f"      ✅ {ip} | {name}")
+                        print(f"         └─ 同订阅IP池共享 ({duplicate_source})")
+                    else:
+                        # 跨订阅IP重复 = 真正的节点重复，才去重
+                        print(f"      ⏭️ {ip} | 跨订阅重复，已去重")
+                        print(f"         ✅ 保留: {duplicate_name} ({duplicate_source})")
+                        print(f"         ❌ 丢弃: {name} ({current_source})")
             else:
                 # IP获取失败的也保留，后续浏览器检测
                 unique_proxies.append(proxy)
