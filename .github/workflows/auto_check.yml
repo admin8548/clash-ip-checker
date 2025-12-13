@@ -34,6 +34,12 @@ jobs:
           # 安装原项目需要的依赖 (如果有 requirements.txt)
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
+      # 【新增步骤】安装 Playwright 浏览器
+      - name: Install Playwright Browsers
+        run: |
+          playwright install chromium
+          playwright install-deps # 安装浏览器需要的系统依赖库
+
       # 4. 下载并合并订阅 (运行你刚才写的脚本)
       - name: Download and Merge Subscriptions
         env:
