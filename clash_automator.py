@@ -133,8 +133,8 @@ async def process_proxies():
         print("No valid proxies left after speed test. Exiting.")
         return
 
-    # --- 阶段 1.5: IP 预检测去重 (优化版:并发检测) ---
-    print(f"\n🔄 [Phase 1.5] Pre-checking IPs for deduplication (Concurrent Mode)...")
+    # --- 阶段 1.5: IP 预检测去重 ---
+    print(f"\n🔄 [Phase 1.5] Pre-checking IPs for deduplication...")
     
     # 强制全局模式
     await controller.set_mode("global")
@@ -168,61 +168,37 @@ async def process_proxies():
     temp_checker = IPChecker(headless=True)
     await temp_checker.start()
     
-    # 并发检测函数
-    async def check_proxy_ip(i, proxy):
-        """并发检测单个节点的IP"""
-        name = proxy['name']
-        
-        # 切换节点
-        if not await controller.switch_proxy(selector_to_use, name):
-            return (i, proxy, None, True)  # (index, proxy, ip, keep_anyway)
-
-        await asyncio.sleep(0.8)  # 稍微缩短等待时间
-        
-        # 快速获取IP
-        ip = await temp_checker.get_simple_ip(local_proxy_url)
-        
-        if ip:
-            return (i, proxy, ip, False)
-        else:
-            # IP获取失败的也保留,后续浏览器检测
-            return (i, proxy, None, True)
-    
     try:
-        # 分批并发处理，每批8个节点
-        batch_size = 8
-        for batch_start in range(0, len(valid_proxies), batch_size):
-            batch_end = min(batch_start + batch_size, len(valid_proxies))
-            batch = valid_proxies[batch_start:batch_end]
+        # 串行逐个检测，给IP池充足的轮询时间
+        for i, proxy in enumerate(valid_proxies):
+            name = proxy['name']
+            print(f"   [{i+1}/{len(valid_proxies)}] Checking: {name}")
             
-            # 并发检测这一批
-            tasks = [check_proxy_ip(batch_start + j, proxy) for j, proxy in enumerate(batch)]
-            batch_results = await asyncio.gather(*tasks)
+            # 切换节点
+            if not await controller.switch_proxy(selector_to_use, name):
+                print(f"      -> Switch failed, keeping node.")
+                unique_proxies.append(proxy)
+                continue
+
+            # 等待切换生效，给IP池时间轮询
+            await asyncio.sleep(1.5)
             
-            # 按索引排序，确保处理顺序一致
-            batch_results.sort(key=lambda x: x[0])
+            # 快速获取IP
+            ip = await temp_checker.get_simple_ip(local_proxy_url)
             
-            # 按顺序处理结果，解决竞态条件
-            for idx, proxy, ip, keep_anyway in batch_results:
-                name = proxy['name']
-                print(f"   [{idx+1}/{len(valid_proxies)}] Checking: {name}")
-                
-                if keep_anyway:
-                    # 切换失败或IP获取失败，保留节点
+            if ip:
+                if ip not in ip_to_proxy:
+                    # 第一次见到这个IP，保留
+                    ip_to_proxy[ip] = proxy
                     unique_proxies.append(proxy)
-                    if ip is None:
-                        print(f"      ❓ Unknown IP | {name}")
-                    else:
-                        print(f"      -> Switch failed, keeping node.")
-                elif ip:
-                    if ip not in ip_to_proxy:
-                        # 第一次见到这个IP，保留
-                        ip_to_proxy[ip] = proxy
-                        unique_proxies.append(proxy)
-                        print(f"      ✅ {ip} | {name}")
-                    else:
-                        # 重复IP，跳过
-                        print(f"      ⏭️ {ip} | {name} (duplicate of {ip_to_proxy[ip]['name']})")
+                    print(f"      ✅ {ip} | {name}")
+                else:
+                    # 重复IP，跳过
+                    print(f"      ⏭️ {ip} | {name} (duplicate of {ip_to_proxy[ip]['name']})")
+            else:
+                # IP获取失败的也保留，后续浏览器检测
+                unique_proxies.append(proxy)
+                print(f"      ❓ Unknown IP | {name}")
     finally:
         await temp_checker.stop()
     
