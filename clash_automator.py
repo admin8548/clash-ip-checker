@@ -18,7 +18,7 @@ OUTPUT_SUFFIX = cfg.get('output_suffix', "_checked")
 
 # 测速配置
 SPEED_TEST_URL = "http://www.gstatic.com/generate_204"
-SPEED_TEST_TIMEOUT = 3000 # 3000ms 超时
+SPEED_TEST_TIMEOUT = 5000 # 5000ms 超时,提高高延迟节点通过率
 
 class ClashController:
     def __init__(self, api_url, secret=""):
@@ -131,8 +131,8 @@ async def process_proxies():
         print("No valid proxies left after speed test. Exiting.")
         return
 
-    # --- 阶段 2: IP 纯净度检查 (原有逻辑) ---
-    print(f"\n🕵️ [Phase 2] Starting IP Purity Check for {len(valid_proxies)} nodes...")
+    # --- 阶段 1.5: IP 预检测去重 ---
+    print(f"\n🔄 [Phase 1.5] Pre-checking IPs for deduplication...")
     
     # 强制全局模式
     await controller.set_mode("global")
@@ -158,15 +158,58 @@ async def process_proxies():
     if not await controller.switch_proxy("GLOBAL", valid_proxies[0]['name']):
         selector_to_use = "Proxy"
 
+    # IP去重逻辑
+    ip_to_proxy = {}  # IP -> 第一个使用该IP的proxy
+    unique_proxies = []
+    
+    # 创建临时checker用于快速IP检测
+    temp_checker = IPChecker(headless=True)
+    await temp_checker.start()
+    
+    try:
+        for i, proxy in enumerate(valid_proxies):
+            name = proxy['name']
+            print(f"   [{i+1}/{len(valid_proxies)}] Checking: {name}")
+            
+            # 切换节点
+            if not await controller.switch_proxy(selector_to_use, name):
+                print(f"      -> Switch failed, keeping node.")
+                unique_proxies.append(proxy)
+                continue
+
+            await asyncio.sleep(1)  # 等待切换生效
+            
+            # 快速获取IP
+            ip = await temp_checker.get_simple_ip(local_proxy_url)
+            
+            if ip:
+                if ip not in ip_to_proxy:
+                    ip_to_proxy[ip] = proxy
+                    unique_proxies.append(proxy)
+                    print(f"      ✅ {ip} | {name}")
+                else:
+                    print(f"      ⏭️ {ip} | {name} (duplicate of {ip_to_proxy[ip]['name']})")
+            else:
+                # IP获取失败的也保留,后续浏览器检测
+                unique_proxies.append(proxy)
+                print(f"      ❓ Unknown IP | {name}")
+    finally:
+        await temp_checker.stop()
+    
+    print(f"\n📊 [Phase 1.5 Summary] Unique IPs: {len(unique_proxies)} / {len(valid_proxies)}")
+    
+    # --- 阶段 2: IP 纯净度检查 (原有逻辑) ---
+    print(f"\n🕵️ [Phase 2] Starting IP Purity Check for {len(unique_proxies)} nodes...")
+
     checker = IPChecker(headless=True)
     await checker.start()
 
     results_map = {} # name -> result_suffix
 
     try:
-        for i, proxy in enumerate(valid_proxies):
+        for i, proxy in enumerate(unique_proxies):
             name = proxy['name']
-            print(f"\n[{i+1}/{len(valid_proxies)}] Checking: {name}")
+            print(f"\n[{i+1}/{len(unique_proxies)}] Checking: {name}")
             
             # 切换节点
             if not await controller.switch_proxy(selector_to_use, name):
@@ -199,14 +242,65 @@ async def process_proxies():
     finally:
         await checker.stop()
 
-    # --- 阶段 3: 保存结果 ---
+    # --- 阶段 3: 统计与保存 ---
+    print("\n📊 [Phase 3] Generating Statistics...")
+    
+    # 统计各等级节点数量
+    stats = {
+        "excellent": 0,  # ⚪ 极佳
+        "good": 0,       # 🟢 优秀
+        "fair": 0,       # 🟡 良好
+        "medium": 0,     # 🟠 中等
+        "poor": 0,       # 🔴 差
+        "bad": 0,        # ⚫ 极差
+        "unknown": 0,    # ❓ 未知
+        "residential": 0, # 住宅IP
+        "datacenter": 0,  # 机房IP
+        "native": 0,      # 原生IP
+        "broadcast": 0    # 广播IP
+    }
+
+    for name, result_str in results_map.items():
+        # 统计纯净度
+        if "⚪" in result_str: stats["excellent"] += 1
+        elif "🟢" in result_str: stats["good"] += 1
+        elif "🟡" in result_str: stats["fair"] += 1
+        elif "🟠" in result_str: stats["medium"] += 1
+        elif "🔴" in result_str: stats["poor"] += 1
+        elif "⚫" in result_str: stats["bad"] += 1
+        else: stats["unknown"] += 1
+        
+        # 统计IP类型
+        if "住宅" in result_str: stats["residential"] += 1
+        elif "机房" in result_str: stats["datacenter"] += 1
+        
+        # 统计IP来源
+        if "原生" in result_str: stats["native"] += 1
+        elif "广播" in result_str: stats["broadcast"] += 1
+
+    # 输出统计报告
+    print(f"""
+╔══════════════════════════════════════╗
+║         节点质量统计报告              ║
+╠══════════════════════════════════════╣
+║ 纯净度分布:                          ║
+║   ⚪ 极佳: {stats['excellent']:3d}  🟢 优秀: {stats['good']:3d}     ║
+║   🟡 良好: {stats['fair']:3d}  🟠 中等: {stats['medium']:3d}     ║
+║   🔴 差:   {stats['poor']:3d}  ⚫ 极差: {stats['bad']:3d}     ║
+║   ❓ 未知: {stats['unknown']:3d}                       ║
+╠══════════════════════════════════════╣
+║ IP类型: 住宅 {stats['residential']:3d} | 机房 {stats['datacenter']:3d}       ║
+║ IP来源: 原生 {stats['native']:3d} | 广播 {stats['broadcast']:3d}       ║
+╚══════════════════════════════════════╝
+""")
+
     print("\n💾 Saving results...")
     
     # 我们只保存 Phase 1 存活下来的节点，并更新名字
     final_proxies = []
     name_mapping = {}
 
-    for proxy in valid_proxies:
+    for proxy in valid_proxies:  # 注意：这里还是用valid_proxies，因为要去重所有节点
         old_name = proxy['name']
         if old_name in results_map:
             # 加上检测结果后缀
