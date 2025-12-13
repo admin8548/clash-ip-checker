@@ -12,7 +12,7 @@ from core.ip_checker import IPChecker
 cfg = load_config("config.yaml") or {}
 
 # User provided path
-CLASH_CONFIG_PATH = cfg.get('yaml_path', r"YOUR_CLASH_CONFIG_PATH_HERE")
+CLASH_CONFIG_PATH = cfg.get('yaml_path', "config.yaml")
 # API URL (Default for Clash)
 CLASH_API_URL = cfg.get('clash_api_url', "http://127.0.0.1:9097")
 CLASH_API_SECRET = cfg.get('clash_api_secret', "")
