@@ -2,15 +2,12 @@ name: Auto Fetch and Check Nodes
 
 on:
   schedule:
-    # 每天北京时间早上 6 点运行 (UTC 时间 22 点)
     - cron: '0 22 * * *'
-  # 允许你手动点击 "Run workflow" 按钮立即运行
   workflow_dispatch:
 
 jobs:
-  check-proxies:
+  process-nodes:
     runs-on: ubuntu-latest
-    # 赋予写权限，允许提交代码
     permissions:
       contents: write
 
@@ -25,38 +22,60 @@ jobs:
         with:
           python-version: '3.10'
 
-      # 3. 安装依赖
+      # 3. 安装 Python 依赖 (包含 Playwright)
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # 安装 requests 和 pyyaml (下载脚本需要)
-          pip install requests pyyaml
-          # 安装原项目需要的依赖 (如果有 requirements.txt)
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-
-      # 【新增步骤】安装 Playwright 浏览器
-      - name: Install Playwright Browsers
-        run: |
+          pip install requests pyyaml aiohttp
+          pip install playwright
           playwright install chromium
-          playwright install-deps # 安装浏览器需要的系统依赖库
+          playwright install-deps
 
-      # 4. 下载并合并订阅 (运行你刚才写的脚本)
+      # 4. 下载并合并订阅 (生成 config.yaml)
       - name: Download and Merge Subscriptions
         env:
           CLASH_SUB_URL: ${{ secrets.CLASH_SUB_URL }}
         run: python download_sub.py
 
-      # 5. 运行 IP 检查 (核心步骤)
-      - name: Run IP Checker
+      # 5. 【核心步骤】下载 Clash (Mihomo) 内核
+      - name: Setup Clash Kernel
         run: |
-          # 根据你的文件列表截图，入口文件很可能是 ipcheck.py
-          # 如果运行报错，可能需要改成 python clash_automator.py
-          python ipcheck.py
+          # 下载 Mihomo (Clash Meta) 内核
+          wget https://github.com/MetaCubeX/mihomo/releases/download/v1.18.1/mihomo-linux-amd64-v1.18.1.gz
+          gzip -d mihomo-linux-amd64-v1.18.1.gz
+          mv mihomo-linux-amd64-v1.18.1 clash
+          chmod +x clash
 
-      # 6. 提交结果回仓库
+      # 6. 【核心步骤】配置并启动 Clash
+      - name: Start Clash in Background
+        run: |
+          # 1. 修改 config.yaml，强制添加 API 配置
+          # clash_automator.py 默认连接 9097 端口
+          echo "" >> config.yaml
+          echo "external-controller: '0.0.0.0:9097'" >> config.yaml
+          echo "secret: ''" >> config.yaml
+          
+          # 2. 后台启动 Clash
+          # -d . 表示使用当前目录作为配置目录
+          nohup ./clash -d . -f config.yaml > clash.log 2>&1 &
+          
+          # 3. 等待 Clash 启动
+          echo "Waiting for Clash to start..."
+          sleep 5
+          
+          # 4. 测试 API 是否通了
+          curl -v http://127.0.0.1:9097/version || echo "Clash start failed!"
+
+      # 7. 运行自动化检查脚本 (改为 clash_automator.py)
+      - name: Run Clash Automator
+        run: |
+          # 这里的脚本会连接本地 9097 端口控制 Clash
+          python clash_automator.py
+
+      # 8. 提交结果
       - name: Commit and Push Changes
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "Auto update: Fetched and Checked Nodes [skip ci]"
-          # 提交所有变动的 yaml 或 txt 文件
+          commit_message: "Auto update: Checked Nodes [skip ci]"
+          # 提交 config.yaml 以及生成的 _checked.yaml 文件
           file_pattern: "*.yaml *.txt"
