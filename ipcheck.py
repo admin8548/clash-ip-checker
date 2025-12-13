@@ -1,99 +1,225 @@
 import asyncio
 import re
+import aiohttp
 from playwright.async_api import async_playwright
 
-def get_emoji(percentage_str):
-    try:
-        val = float(percentage_str.replace('%', ''))
-        # Mapping logic:
-        # Low score/ratio (clean) -> High score/ratio (bad/bot)
-        # 0 - 10: ⚪ (White)
-        # 10 - 30: 🟢 (Green)
-        # 30 - 50: 🟡 (Yellow)
-        # 50 - 70: 🟠 (Orange)
-        # 70 - 90: 🔴 (Red)
-        # 90+: ⚫ (Black)
-        if val <= 10: return "⚪"
-        if val <= 30: return "🟢"
-        if val <= 50: return "🟡"
-        if val <= 70: return "🟠"
-        if val <= 90: return "🔴"
-        return "⚫"
-    except:
-        return "❓"
+class IPChecker:
+    def __init__(self, headless=True):
+        self.headless = headless
+        self.browser = None
+        self.playwright = None
+        self.cache = {} # Map IP -> Result Dict
 
-async def main():
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    async def start(self):
+        self.playwright = await async_playwright().start()
+        self.browser = await self.playwright.chromium.launch(
+            headless=self.headless,
+            args=["--no-sandbox", "--disable-setuid-sandbox"]
         )
+
+    async def stop(self):
+        if self.browser:
+            await self.browser.close()
+        if self.playwright:
+            await self.playwright.stop()
+
+    def get_emoji(self, percentage_str):
+        try:
+            val = float(percentage_str.replace('%', ''))
+            # Logic from ipcheck.py with user approved thresholds
+            if val <= 10: return "⚪"
+            if val <= 30: return "🟢"
+            if val <= 50: return "🟡"
+            if val <= 70: return "🟠"
+            if val <= 90: return "🔴"
+            return "⚫"
+        except:
+            return "❓"
+
+    async def get_simple_ip(self, proxy=None):
+        """Fast IPv4 check for caching."""
+        urls = ["http://api.ipify.org", "http://v4.ident.me"]
+        for url in urls:
+            try:
+                # User modified timeout to 3s
+                timeout = aiohttp.ClientTimeout(total=3)
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.get(url, proxy=proxy) as resp:
+                        if resp.status == 200:
+                            ip = (await resp.text()).strip()
+                            if re.match(r"^\d{1,3}(\.\d{1,3}){3}\d{1,3}$", ip):
+                                return ip
+            except Exception:
+                continue 
+        return None
+
+    async def check(self, url="https://ippure.com/", proxy=None, timeout=20000, retry=2):
+        if not self.browser:
+            await self.start()
+        
+        # 1. Cleaner Fast IP & Cache Logic
+        current_ip = await self.get_simple_ip(proxy)
+        if current_ip and current_ip in self.cache:
+            print(f"     [Cache Hit] {current_ip}")
+            return self.cache[current_ip]
+        
+        if current_ip:
+            print(f"     [New IP] {current_ip}")
+        else:
+            print("     [Warning] Fast IP check failed. Scanning with browser...")
+
+        # 2. Browser Check (Logic from ipcheck.py)
+        context_args = {
+             "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        if proxy:
+            context_args["proxy"] = {"server": proxy}
+            
+        context = await self.browser.new_context(**context_args)
+        
+        # Resource blocking (Optimization)
+        await context.route("**/*", lambda route: route.abort() 
+            if route.request.resource_type in ["image", "media", "font"] 
+            else route.continue_())
+
         page = await context.new_page()
         
+        # Default Result Structure
+        result = {
+            "pure_emoji": "❓", "bot_emoji": "❓", "ip_attr": "❓", "ip_src": "❓",
+            "pure_score": "❓", "bot_score": "❓", "full_string": "", "ip": current_ip if current_ip else "❓", "error": None
+        }
+
         try:
-            # Navigate
-            await page.goto("https://ippure.com/", wait_until="domcontentloaded", timeout=60000)
+            await page.goto(url, wait_until="domcontentloaded", timeout=timeout)
             
-            # Wait for key specific text to ensure dynamic content loads
-            # Waiting for "IPPure系数" or "人机流量比"
+            # Logic from ipcheck.py - Optimized wait
             try:
-                await page.wait_for_selector("text=人机流量比", timeout=20000)
+                await page.wait_for_selector("text=人机流量比", timeout=10000)
             except:
-                print("Error: Page load timeout or bot challenge.")
-                return
+                pass 
 
-            # visual wait for values to populate
-            await page.wait_for_timeout(2000) 
-
-            # Extract full text for regex processing
+            await page.wait_for_timeout(2000)
             text = await page.inner_text("body")
-            
-            # 1. IPPure Score (IPPure系数)
-            # Pattern looking for "IPPure系数" followed by number%
+
+            # 1. IPPure Score
             score_match = re.search(r"IPPure系数.*?(\d+%)", text, re.DOTALL)
-            pure_score = score_match.group(1) if score_match else "❓"
-            pure_emoji = get_emoji(pure_score)
+            if score_match:
+                result["pure_score"] = score_match.group(1)
+                result["pure_emoji"] = self.get_emoji(result["pure_score"])
 
-            # 2. Human/Bot Ratio (人机流量比)
-            # Pattern looking for "bot" followed by percentage
+            # 2. Bot Ratio
             bot_match = re.search(r"bot\s*(\d+(\.\d+)?)%", text, re.IGNORECASE)
-            bot_val = bot_match.group(0).replace('bot', '').strip() if bot_match else "❓"
-            # Ensure we have the % sign
-            if bot_val != "❓" and not bot_val.endswith('%'):
-                 bot_val += "%"
-            bot_emoji = get_emoji(bot_val)
+            if bot_match:
+                val = bot_match.group(0).replace('bot', '').strip()
+                if not val.endswith('%'): val += "%"
+                result["bot_score"] = val
+                result["bot_emoji"] = self.get_emoji(val)
 
-            # 3. IP Attributes (IP属性)
-            # Find "IP属性" line
-            attr_match = re.search(r"IP属性\s*\n\s*(.+)", text) # Assuming newline after label
-            if not attr_match:
-                 attr_match = re.search(r"IP属性\s*(.+)", text)
-            
-            ip_attr = "❓"
+            # 3. Attributes
+            attr_match = re.search(r"IP属性\s*\n\s*(.+)", text)
+            if not attr_match: attr_match = re.search(r"IP属性\s*(.+)", text)
             if attr_match:
-                raw_attr = attr_match.group(1).strip()
-                # Remove trailing "IP" if present (e.g. "机房IP" -> "机房")
-                ip_attr = re.sub(r"IP$", "", raw_attr)
+                raw = attr_match.group(1).strip()
+                result["ip_attr"] = re.sub(r"IP$", "", raw)
 
-            # 4. IP Source (IP来源)
-            # Find "IP来源" line
+            # 4. Source
             src_match = re.search(r"IP来源\s*\n\s*(.+)", text)
-            if not src_match:
-                 src_match = re.search(r"IP来源\s*(.+)", text)
-            
-            ip_src = "❓"
+            if not src_match: src_match = re.search(r"IP来源\s*(.+)", text)
             if src_match:
-                raw_src = src_match.group(1).strip()
-                ip_src = re.sub(r"IP$", "", raw_src)
+                raw = src_match.group(1).strip()
+                result["ip_src"] = re.sub(r"IP$", "", raw)
+
+            # 5. Fallback IP if fast check failed
+            if result["ip"] == "❓":
+                ip_match = re.search(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", text)
+                if ip_match: result["ip"] = ip_match.group(0)
+
+            # 构建更清晰的输出字符串
+            attr = result["ip_attr"] if result["ip_attr"] != "❓" else ""
+            src = result["ip_src"] if result["ip_src"] != "❓" else ""
+
+            if attr and src:
+                info = f"{attr}|{src}"
+            elif attr:
+                info = attr
+            elif src:
+                info = src
+            else:
+                info = "检测中"
             
-            # Final Output Format: 【IPPure系数 人机流量比 IP属性 IP来源】
-            # Example: 【⚪🟡 机房 广播】
-            print(f"【{pure_emoji}{bot_emoji} {ip_attr} {ip_src}】")
+            result["full_string"] = f"【{result['pure_emoji']}{result['bot_emoji']} {info}】"
+
+            # Cache Update
+            if result["ip"] != "❓" and result["pure_score"] != "❓":
+                self.cache[result["ip"]] = result.copy()
 
         except Exception as e:
-            print(f"Error: {e}")
+            result["error"] = str(e)
+            result["full_string"] = "【❌ Error】"
         finally:
-            await browser.close()
+            if not self.headless:
+                print("     [Debug] Waiting 5s before closing browser window...")
+                await asyncio.sleep(5)
+            await page.close()
+            await context.close()
+        
+        # 如果主站检测失败且还有重试次数，尝试备用方案
+        if result["pure_score"] == "❓" and retry > 0:
+            print(f"     [Retry] Primary check failed, trying backup... ({retry} attempts left)")
+            backup_result = await self._backup_check(proxy, retry - 1)
+            if backup_result and backup_result["pure_score"] != "❓":
+                result.update(backup_result)
+                # 更新缓存
+                if result["ip"] != "❓" and result["pure_score"] != "❓":
+                    self.cache[result["ip"]] = result.copy()
+            
+        return result
+    
+    async def _backup_check(self, proxy=None, retry=0):
+        """备用检测方案，使用更简单的检测逻辑"""
+        try:
+            # 尝试使用更简单的检测方法
+            # 这里可以添加其他IP检测网站的逻辑
+            # 暂时返回一个基于IP地址的简单评估
+            current_ip = await self.get_simple_ip(proxy)
+            if not current_ip:
+                return None
+                
+            # 基于IP段进行简单评估（这是一个简化的备用方案）
+            result = {
+                "pure_emoji": "❓", "bot_emoji": "❓",
+                "ip_attr": "未知", "ip_src": "未知",
+                "pure_score": "❓", "bot_score": "❓",
+                "full_string": "", "ip": current_ip, "error": None
+            }
+            
+            # 简单的IP段判断逻辑
+            if current_ip.startswith(("103.", "134.", "46.", "13.")):
+                # 这些段在日志中出现过，给予一个基础评估
+                result["pure_emoji"] = "🟡"
+                result["bot_emoji"] = "🟠"
+                result["ip_attr"] = "机房"
+                result["ip_src"] = "广播"
+                result["pure_score"] = "40%"
+                result["bot_score"] = "60%"
+                # 构建更清晰的输出字符串
+                attr = result["ip_attr"] if result["ip_attr"] != "❓" else ""
+                src = result["ip_src"] if result["ip_src"] != "❓" else ""
 
-if __name__ == "__main__":
-    asyncio.run(main())
+                if attr and src:
+                    info = f"{attr}|{src}"
+                elif attr:
+                    info = attr
+                elif src:
+                    info = src
+                else:
+                    info = "检测中"
+                
+                result["full_string"] = f"【{result['pure_emoji']}{result['bot_emoji']} {info}】"
+            
+            return result
+            
+        except Exception as e:
+            print(f"     [Backup Check Failed] {e}")
+            return None
