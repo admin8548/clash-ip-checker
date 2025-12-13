@@ -79,10 +79,12 @@ jobs:
           # 这里的脚本会连接本地 9097 端口控制 Clash
           python -u clash_automator.py
 
-      # 8. 提交结果
-      - name: Commit and Push Changes
-        uses: stefanzweifel/git-auto-commit-action@v5
+      # 8. 发布到 Gist
+      - name: Deploy to Gist
+        uses: exuanbo/actions-deploy-gist@v1
         with:
-          commit_message: "Auto update: Checked Nodes [skip ci]"
-          # 提交 config.yaml 以及生成的 _checked.yaml 文件
-          file_pattern: "*.yaml *.txt"
+          token: ${{ secrets.GIST_PAT }}
+          gist_id: ${{ secrets.GIST_ID }}
+          file_path: config_checked.yaml
+          # Gist 里的文件名，建议和本地保持一致，或者叫 sub.yaml
+          gist_file_name: clash_subs.yaml 
