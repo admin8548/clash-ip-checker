@@ -79,12 +79,20 @@ jobs:
           # 这里的脚本会连接本地 9097 端口控制 Clash
           python -u clash_automator.py
 
-      # 8. 发布到 Gist
-      - name: Deploy to Gist
+      # 8. 发布Clash格式到 Gist
+      - name: Deploy Clash to Gist
         uses: exuanbo/actions-deploy-gist@v1
         with:
           token: ${{ secrets.GIST_PAT }}
           gist_id: ${{ secrets.GIST_ID }}
           file_path: config_checked.yaml
-          # Gist 里的文件名，建议和本地保持一致，或者叫 sub.yaml
-          gist_file_name: clash_subs.yaml 
+          gist_file_name: clash_subs.yaml
+      
+      # 9. 发布v2rayN格式到 Gist
+      - name: Deploy v2rayN to Gist
+        uses: exuanbo/actions-deploy-gist@v1
+        with:
+          token: ${{ secrets.GIST_PAT }}
+          gist_id: ${{ secrets.GIST_ID }}
+          file_path: config_checked_v2rayn.txt
+          gist_file_name: v2rayn_subs.txt
