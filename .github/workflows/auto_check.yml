@@ -49,21 +49,28 @@ jobs:
       # 6. 【核心步骤】配置并启动 Clash
       - name: Start Clash in Background
         run: |
-          # 1. 修改 config.yaml，强制添加 API 配置
-          # clash_automator.py 默认连接 9097 端口
+          # --- 新增配置开始 ---
+          # 强制写入基础配置，确保 Clash 打开代理端口
+          echo "mixed-port: 7890" >> config.yaml
+          echo "allow-lan: true" >> config.yaml
+          echo "bind-address: '*'" >> config.yaml
+          echo "mode: global" >> config.yaml
+          echo "log-level: info" >> config.yaml
+          # --- 新增配置结束 ---
+
+          # 之前加的控制端口配置
           echo "" >> config.yaml
           echo "external-controller: '0.0.0.0:9097'" >> config.yaml
           echo "secret: ''" >> config.yaml
           
-          # 2. 后台启动 Clash
-          # -d . 表示使用当前目录作为配置目录
+          # 后台启动 Clash
           nohup ./clash -d . -f config.yaml > clash.log 2>&1 &
           
-          # 3. 等待 Clash 启动
+          # 等待启动
           echo "Waiting for Clash to start..."
           sleep 5
           
-          # 4. 测试 API 是否通了
+          # 测试 API
           curl -v http://127.0.0.1:9097/version || echo "Clash start failed!"
 
       # 7. 运行自动化检查脚本 (改为 clash_automator.py)
