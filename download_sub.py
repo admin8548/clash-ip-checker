@@ -58,11 +58,11 @@ final_config = {
 }
 
 try:
-    with open("source.yaml", "w", encoding='utf-8') as f:
+    with open("config.yaml", "w", encoding='utf-8') as f:
         # allow_unicode=True 确保中文字符正常显示
         yaml.dump(final_config, f, allow_unicode=True, default_flow_style=False)
     
-    print(f"All done! Merged {len(merged_proxies)} nodes into source.yaml")
+    print(f"All done! Merged {len(merged_proxies)} nodes into config.yaml")
 
 except Exception as e:
     print(f"Failed to save file: {e}")
