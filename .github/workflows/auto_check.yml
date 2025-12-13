@@ -1,0 +1,56 @@
+name: Auto Fetch and Check Nodes
+
+on:
+  schedule:
+    # 每天北京时间早上 6 点运行 (UTC 时间 22 点)
+    - cron: '0 22 * * *'
+  # 允许你手动点击 "Run workflow" 按钮立即运行
+  workflow_dispatch:
+
+jobs:
+  check-proxies:
+    runs-on: ubuntu-latest
+    # 赋予写权限，允许提交代码
+    permissions:
+      contents: write
+
+    steps:
+      # 1. 拉取代码
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 2. 准备 Python 环境
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      # 3. 安装依赖
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # 安装 requests 和 pyyaml (下载脚本需要)
+          pip install requests pyyaml
+          # 安装原项目需要的依赖 (如果有 requirements.txt)
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      # 4. 下载并合并订阅 (运行你刚才写的脚本)
+      - name: Download and Merge Subscriptions
+        env:
+          CLASH_SUB_URL: ${{ secrets.CLASH_SUB_URL }}
+        run: python download_sub.py
+
+      # 5. 运行 IP 检查 (核心步骤)
+      - name: Run IP Checker
+        run: |
+          # 根据你的文件列表截图，入口文件很可能是 ipcheck.py
+          # 如果运行报错，可能需要改成 python clash_automator.py
+          python ipcheck.py
+
+      # 6. 提交结果回仓库
+      - name: Commit and Push Changes
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Auto update: Fetched and Checked Nodes [skip ci]"
+          # 提交所有变动的 yaml 或 txt 文件
+          file_pattern: "*.yaml *.txt"
