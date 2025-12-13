@@ -2,8 +2,12 @@ name: Auto Fetch and Check Nodes
 
 on:
   schedule:
-    - cron: '0 22 * * *'
-  workflow_dispatch:
+    # 每天4次定时运行（北京时间）
+    - cron: '0 0 * * *'   # 早上 08:00 (UTC 00:00)
+    - cron: '30 3 * * *'  # 中午 11:30 (UTC 03:30)
+    - cron: '0 8 * * *'   # 下午 16:00 (UTC 08:00)
+    - cron: '0 12 * * *'  # 晚上 20:00 (UTC 12:00)
+  workflow_dispatch:  # 保留手动触发功能
 
 jobs:
   process-nodes:
