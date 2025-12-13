@@ -77,7 +77,7 @@ jobs:
       - name: Run Clash Automator
         run: |
           # 这里的脚本会连接本地 9097 端口控制 Clash
-          python clash_automator.py
+          python -u clash_automator.py
 
       # 8. 提交结果
       - name: Commit and Push Changes
