@@ -22,7 +22,9 @@ headers = {
 }
 
 for index, url in enumerate(urls):
-    print(f"[{index+1}/{len(urls)}] Downloading: {url[:15]}...")
+    # 生成订阅源标识（Sub-1, Sub-2, ...）
+    source_id = f"Sub-{index+1}"
+    print(f"[{index+1}/{len(urls)}] Downloading: {url[:15]}... ({source_id})")
     try:
         resp = requests.get(url, headers=headers, timeout=30)
         resp.raise_for_status()
@@ -38,7 +40,13 @@ for index, url in enumerate(urls):
         # 提取 proxies 部分
         if data and 'proxies' in data and isinstance(data['proxies'], list):
             count = len(data['proxies'])
-            print(f"  -> Success: Extracted {count} nodes.")
+            print(f"  -> Success: Extracted {count} nodes from {source_id}.")
+            
+            # 给每个节点添加订阅源标记
+            for proxy in data['proxies']:
+                if isinstance(proxy, dict):
+                    proxy['_source'] = source_id
+            
             merged_proxies.extend(data['proxies'])
         else:
             print(f"  -> Warning: No 'proxies' list found in {url}.")
