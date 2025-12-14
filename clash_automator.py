@@ -74,22 +74,25 @@ class ClashController:
             return None
 
 async def process_proxies():
-    print(f"Loading config from: {CLASH_CONFIG_PATH}")
+    print(f"Loading config from: {CLASH_CONFIG_PATH}", flush=True)
     if not os.path.exists(CLASH_CONFIG_PATH):
-        print(f"Error: Config file not found at {CLASH_CONFIG_PATH}")
+        print(f"Error: Config file not found at {CLASH_CONFIG_PATH}", flush=True)
         return
 
     try:
         with open(CLASH_CONFIG_PATH, 'r', encoding='utf-8') as f:
             config_data = yaml.full_load(f)
+        print(f"Config loaded successfully", flush=True)
     except Exception as e:
-        print(f"Error parsing YAML: {e}")
+        print(f"Error parsing YAML: {e}", flush=True)
         return
 
     proxies = config_data.get('proxies', [])
     if not proxies:
-        print("No 'proxies' found in config.")
+        print("No 'proxies' found in config.", flush=True)
         return
+    
+    print(f"Found {len(proxies)} proxies in config", flush=True)
 
     SKIP_KEYWORDS = ["剩余", "重置", "到期", "有效期", "官网", "网址", "更新", "公告"]
     
@@ -598,4 +601,10 @@ def convert_hysteria2(proxy):
     return f"hysteria2://{password}@{server}:{port}?{query}#{name}"
 
 if __name__ == "__main__":
-    asyncio.run(process_proxies())
+    try:
+        asyncio.run(process_proxies())
+    except Exception as e:
+        print(f"\n❌ Fatal error: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
