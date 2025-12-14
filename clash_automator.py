@@ -1,3 +1,7 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+print("🚀 Starting clash_automator.py...", flush=True)
+
 import asyncio
 import yaml
 import aiohttp
@@ -6,8 +10,14 @@ import os
 import sys
 import base64
 import json
+
+print("   ✅ Standard imports OK", flush=True)
+
 from utils.config_loader import load_config
+print("   ✅ config_loader imported", flush=True)
+
 from core.ip_checker import IPChecker
+print("   ✅ ip_checker imported", flush=True)
 
 # --- CONFIGURATION ---
 cfg = load_config("config.yaml") or {}
