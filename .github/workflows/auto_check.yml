@@ -39,7 +39,15 @@ jobs:
       - name: Download and Merge Subscriptions
         env:
           CLASH_SUB_URL: ${{ secrets.CLASH_SUB_URL }}
-        run: python download_sub.py
+        run: |
+          echo "=== Starting download_sub.py ==="
+          echo "CLASH_SUB_URL is set: $([[ -n \"$CLASH_SUB_URL\" ]] && echo 'YES' || echo 'NO')"
+          python -u download_sub.py
+          echo "=== download_sub.py finished ==="
+          echo "Checking generated files:"
+          ls -la config.yaml 2>/dev/null || echo "config.yaml not found!"
+          echo "First 20 lines of config.yaml:"
+          head -20 config.yaml 2>/dev/null || echo "Cannot read config.yaml"
 
       # 5. 【核心步骤】下载 Clash (Mihomo) 内核
       - name: Setup Clash Kernel
@@ -80,8 +88,17 @@ jobs:
       # 7. 运行自动化检查脚本 (改为 clash_automator.py)
       - name: Run Clash Automator
         run: |
+          echo "=== Starting Clash Automator ==="
+          echo "Python version: $(python --version)"
+          echo "Current directory: $(pwd)"
+          echo "Files in directory:"
+          ls -la
+          echo "=== Running script ==="
           # 这里的脚本会连接本地 9097 端口控制 Clash
-          python -u clash_automator.py
+          python -u clash_automator.py 2>&1 || echo "Script exited with error code: $?"
+          echo "=== Script finished ==="
+          echo "Checking output files:"
+          ls -la *.yaml *.txt 2>/dev/null || echo "No output files found"
 
       # 8. 发布Clash格式到 Gist
       - name: Deploy Clash to Gist
