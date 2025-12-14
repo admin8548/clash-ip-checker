@@ -164,6 +164,9 @@ async def process_proxies():
     ip_to_proxy = {}  # IP -> 第一个使用该IP的proxy
     unique_proxies = []
     
+    # 新增：记录每个节点的IP状态（用于Phase 2优化）
+    node_ip_map = {}  # name -> ip (or None if failed)
+    
     # 创建临时checker用于快速IP检测
     temp_checker = IPChecker(headless=True)
     await temp_checker.start()
@@ -186,6 +189,9 @@ async def process_proxies():
             
             # 快速获取IP
             ip = await temp_checker.get_simple_ip(local_proxy_url)
+            
+            # 记录IP映射（用于Phase 2优化）
+            node_ip_map[name] = ip  # 可能是 None
             
             if ip:
                 if ip not in ip_to_proxy:
@@ -219,49 +225,113 @@ async def process_proxies():
     
     print(f"\n📊 [Phase 1.5 Summary] Unique IPs: {len(unique_proxies)} / {len(valid_proxies)}")
     
-    # --- 阶段 2: IP 纯净度检查 (原有逻辑) ---
-    print(f"\n🕵️ [Phase 2] Starting IP Purity Check for {len(unique_proxies)} nodes...")
-
+    # --- 阶段 2: IP 纯净度检查 (优化版：三层优化策略) ---
+    print(f"\n🕵️ [Phase 2] Starting IP Purity Check (Optimized)...")
+    
+    # 统计信息
+    stats_skipped = 0    # 跳过的节点（IP不可用）
+    stats_cached = 0     # 缓存继承的节点
+    stats_detected = 0   # 实际检测的节点
+    
+    results_map = {}  # name -> result_suffix
+    ip_result_cache = {}  # IP -> result_string (缓存复用)
+    
+    # 层次1 & 层次3：按IP分组，跳过失败节点
+    ip_groups = {}  # IP -> list of proxies
+    skipped_proxies = []  # IP获取失败的节点
+    
+    for proxy in unique_proxies:
+        name = proxy['name']
+        ip = node_ip_map.get(name)
+        if ip:
+            ip_groups.setdefault(ip, []).append(proxy)
+        else:
+            # 层次1：IP获取失败的节点直接标记为未知
+            results_map[name] = "【❓❓ 未知】"
+            skipped_proxies.append(name)
+            stats_skipped += 1
+    
+    print(f"   📊 预处理统计:")
+    print(f"      - 跳过 (IP不可用): {stats_skipped} 节点")
+    print(f"      - 待检测唯一IP数: {len(ip_groups)} 个")
+    print(f"      - 涉及节点总数: {len(unique_proxies) - stats_skipped} 个")
+    
+    if skipped_proxies:
+        print(f"\n   ⏭️ 跳过的节点 (Phase 1.5 IP获取失败):")
+        for name in skipped_proxies[:5]:  # 只显示前5个
+            print(f"      - {name}")
+        if len(skipped_proxies) > 5:
+            print(f"      ... 及其他 {len(skipped_proxies) - 5} 个节点")
+    
     checker = IPChecker(headless=True)
     await checker.start()
 
-    results_map = {} # name -> result_suffix
-
     try:
-        for i, proxy in enumerate(unique_proxies):
-            name = proxy['name']
-            print(f"\n[{i+1}/{len(unique_proxies)}] Checking: {name}")
+        # 层次3：每个IP只检测一个代表节点
+        ip_list = list(ip_groups.keys())
+        for i, ip in enumerate(ip_list):
+            group = ip_groups[ip]
+            representative = group[0]  # 取第一个作为代表
+            representative_name = representative['name']
             
-            # 切换节点
-            if not await controller.switch_proxy(selector_to_use, name):
-                print("  -> Switch failed.")
-                continue
-
-            await asyncio.sleep(2) # 等待切换生效
-
-            # 测 IP
-            res = None
-            for attempt in range(2):
+            print(f"\n[{i+1}/{len(ip_list)}] 检测IP: {ip}")
+            print(f"   代表节点: {representative_name}")
+            if len(group) > 1:
+                print(f"   同IP节点: {len(group)} 个 (将继承结果)")
+            
+            # 切换到代表节点
+            if not await controller.switch_proxy(selector_to_use, representative_name):
+                print("   ❌ 代理切换失败，标记为未知")
+                result = "【❓❓ 未知】"
+            else:
+                await asyncio.sleep(1)  # 层次2：从2秒优化到1秒
+                
+                # 检测IP纯净度
+                res = None
                 try:
-                    res = await checker.check(proxy=local_proxy_url)
+                    res = await checker.check(proxy=local_proxy_url, timeout=10000)  # 层次2：超时优化
                     if res.get('error') is None and res.get('pure_score') != '❓':
-                         break
-                    if attempt == 0:
-                        await asyncio.sleep(2)
-                except Exception:
-                     pass
+                        result = res.get('full_string', "【❓❓ 未知】")
+                    else:
+                        result = res.get('full_string', "【❓❓ 未知】")
+                except Exception as e:
+                    print(f"   ⚠️ 检测异常: {e}")
+                    result = "【❓❓ 未知】"
+                
+                stats_detected += 1
             
-            if not res:
-                 res = {"full_string": "【❌ Error】", "ip": "Error"}
-
-            full_str = res['full_string']
-            print(f"  -> Result: {full_str} | IP: {res.get('ip')}")
-            results_map[name] = full_str
+            # 缓存结果
+            ip_result_cache[ip] = result
+            
+            # 传播结果到所有同IP节点
+            for proxy in group:
+                name = proxy['name']
+                results_map[name] = result
+                if name != representative_name:
+                    stats_cached += 1
+            
+            # 显示结果
+            print(f"   ✅ 结果: {result}")
+            if len(group) > 1:
+                inherited_names = [p['name'] for p in group[1:]]
+                for inherited_name in inherited_names[:3]:
+                    print(f"      ↳ 缓存继承: {inherited_name}")
+                if len(inherited_names) > 3:
+                    print(f"      ↳ ... 及其他 {len(inherited_names) - 3} 个节点")
 
     except KeyboardInterrupt:
         print("\nInterrupted. Saving...")
     finally:
         await checker.stop()
+    
+    # 输出Phase 2统计
+    print(f"\n📊 [Phase 2 Summary - 优化效果]")
+    print(f"   ⏭️ 跳过 (IP不可用): {stats_skipped} 节点")
+    print(f"   🔍 实际检测: {stats_detected} 个唯一IP")
+    print(f"   💾 缓存继承: {stats_cached} 节点")
+    print(f"   📈 检测效率: 检测 {stats_detected} 次覆盖 {len(unique_proxies)} 节点")
+    if stats_detected > 0:
+        print(f"   ⚡ 优化比例: {(stats_skipped + stats_cached) / len(unique_proxies) * 100:.1f}% 节点无需检测")
 
     # --- 阶段 3: 统计与保存 ---
     print("\n📊 [Phase 3] Generating Statistics...")
