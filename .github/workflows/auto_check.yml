@@ -100,20 +100,79 @@ jobs:
           echo "Checking output files:"
           ls -la *.yaml *.txt 2>/dev/null || echo "No output files found"
 
-      # 8. 发布Clash格式到 Gist
-      - name: Deploy Clash to Gist
-        uses: exuanbo/actions-deploy-gist@v1
-        with:
-          token: ${{ secrets.GIST_PAT }}
-          gist_id: ${{ secrets.GIST_ID }}
-          file_path: config_checked.yaml
-          gist_file_name: clash_subs.yaml
-      
-      # 9. 发布v2rayN格式到 Gist
-      - name: Deploy v2rayN to Gist
-        uses: exuanbo/actions-deploy-gist@v1
-        with:
-          token: ${{ secrets.GIST_PAT }}
-          gist_id: ${{ secrets.GIST_ID }}
-          file_path: config_checked_v2rayn.txt
-          gist_file_name: v2rayn_subs.txt
+      # 8. 发布所有文件到 Gist (合并步骤)
+      - name: Deploy All Files to Gist
+        env:
+          GIST_PAT: ${{ secrets.GIST_PAT }}
+          GIST_ID: ${{ secrets.GIST_ID }}
+        run: |
+          echo "📤 Deploying files to Gist..."
+          
+          # 检查文件是否存在
+          echo "Checking output files:"
+          ls -la config_checked.yaml config_checked_v2rayn.txt report.md 2>/dev/null || true
+          
+          # 使用 GitHub API 更新 Gist
+          # 构建 JSON payload
+          python3 << 'EOF'
+          import json
+          import os
+          import requests
+          
+          gist_id = os.environ.get('GIST_ID', '')
+          token = os.environ.get('GIST_PAT', '')
+          
+          if not gist_id or not token:
+              print("❌ Error: GIST_ID or GIST_PAT not set")
+              exit(1)
+          
+          files = {}
+          
+          # Clash 订阅
+          if os.path.exists('config_checked.yaml'):
+              with open('config_checked.yaml', 'r', encoding='utf-8') as f:
+                  files['clash_subs.yaml'] = {'content': f.read()}
+              print("✅ Added: clash_subs.yaml")
+          else:
+              print("⚠️ Missing: config_checked.yaml")
+          
+          # v2rayN 订阅
+          if os.path.exists('config_checked_v2rayn.txt'):
+              with open('config_checked_v2rayn.txt', 'r', encoding='utf-8') as f:
+                  files['v2rayn_subs.txt'] = {'content': f.read()}
+              print("✅ Added: v2rayn_subs.txt")
+          else:
+              print("⚠️ Missing: config_checked_v2rayn.txt")
+          
+          # 统计报告
+          if os.path.exists('report.md'):
+              with open('report.md', 'r', encoding='utf-8') as f:
+                  files['report.md'] = {'content': f.read()}
+              print("✅ Added: report.md")
+          else:
+              print("⚠️ Missing: report.md")
+          
+          if not files:
+              print("❌ No files to upload!")
+              exit(1)
+          
+          # 调用 GitHub API
+          url = f"https://api.github.com/gists/{gist_id}"
+          headers = {
+              'Authorization': f'token {token}',
+              'Accept': 'application/vnd.github.v3+json'
+          }
+          payload = {'files': files}
+          
+          response = requests.patch(url, headers=headers, json=payload)
+          
+          if response.status_code == 200:
+              print(f"✅ Successfully updated Gist!")
+              print(f"   Files uploaded: {len(files)}")
+              for name in files.keys():
+                  print(f"   - {name}")
+          else:
+              print(f"❌ Failed to update Gist: {response.status_code}")
+              print(response.text)
+              exit(1)
+          EOF
