@@ -382,7 +382,7 @@ async def process_proxies():
         if "原生" in result_str: stats["native"] += 1
         elif "广播" in result_str: stats["broadcast"] += 1
 
-    # 输出统计报告
+    # 输出统计报告到控制台
     print(f"""
 ╔══════════════════════════════════════╗
 ║         节点质量统计报告              ║
@@ -466,6 +466,7 @@ async def process_proxies():
         except Exception as e:
             print(f"  ⚠️ Failed to convert {proxy['name']}: {e}")
     
+    v2rayn_count = 0
     if v2rayn_links:
         # Base64编码
         v2rayn_content = '\n'.join(v2rayn_links)
@@ -480,10 +481,80 @@ async def process_proxies():
                 f.write(v2rayn_base64)
             print(f"✅ v2rayN格式已保存: {v2rayn_path}")
             print(f"   节点数量: {len(v2rayn_links)}")
+            v2rayn_count = len(v2rayn_links)
         except Exception as e:
             print(f"Error saving v2rayN subscription: {e}")
     else:
         print("⚠️ 没有可转换的节点用于v2rayN格式")
+    
+    # --- 生成统计报告文件 (Markdown格式) ---
+    print("\n📊 Generating statistics report...")
+    
+    from datetime import datetime, timezone, timedelta
+    # 北京时间
+    beijing_tz = timezone(timedelta(hours=8))
+    update_time = datetime.now(beijing_tz).strftime("%Y-%m-%d %H:%M:%S")
+    
+    clash_count = len(final_proxies)
+    
+    report_content = f"""# 📊 节点质量统计报告
+
+> 🕐 更新时间: {update_time} (北京时间)
+
+## 📈 可用节点统计
+
+| 格式 | 节点数量 |
+|------|----------|
+| **Clash** | {clash_count} |
+| **v2rayN** | {v2rayn_count} |
+
+## 🎯 纯净度分布
+
+| 等级 | 数量 | 说明 |
+|------|------|------|
+| ⚪ 极佳 | {stats['excellent']} | 几乎无风控 |
+| 🟢 优秀 | {stats['good']} | 风控很少 |
+| 🟡 良好 | {stats['fair']} | 轻度风控 |
+| 🟠 中等 | {stats['medium']} | 中度风控 |
+| 🔴 差 | {stats['poor']} | 风控较多 |
+| ⚫ 极差 | {stats['bad']} | 风控严重 |
+| ❓ 未知 | {stats['unknown']} | 检测失败 |
+
+## 🏠 IP 类型分布
+
+| 类型 | 数量 |
+|------|------|
+| 🏠 住宅 IP | {stats['residential']} |
+| 🏢 机房 IP | {stats['datacenter']} |
+
+## 🌍 IP 来源分布
+
+| 来源 | 数量 |
+|------|------|
+| 🌐 原生 IP | {stats['native']} |
+| 📡 广播 IP | {stats['broadcast']} |
+
+## 📋 检测流程统计
+
+| 阶段 | 说明 | 数量 |
+|------|------|------|
+| Phase 1 | 连通性测试通过 | {len(valid_proxies)} |
+| Phase 1.5 | IP去重后 | {len(unique_proxies)} |
+| Phase 2 | 实际检测IP数 | {stats_detected} |
+| 跳过 | IP获取失败 | {stats_skipped} |
+| 缓存继承 | 同IP复用结果 | {stats_cached} |
+
+---
+*由 [Clash IP Checker](https://github.com/your-repo/clash-ip-checker) 自动生成*
+"""
+    
+    report_path = os.path.join(os.getcwd(), "report.md")
+    try:
+        with open(report_path, 'w', encoding='utf-8') as f:
+            f.write(report_content)
+        print(f"✅ 统计报告已保存: {report_path}")
+    except Exception as e:
+        print(f"Error saving report: {e}")
 
 def convert_to_v2rayn_link(proxy):
     """
